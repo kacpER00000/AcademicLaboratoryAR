@@ -79,6 +79,10 @@ jobs:
                     - "*.usdz"
                 - path: SalaAR/nxp.usdz
                   buildPhase: resources
+                - path: SalaAR/Ipad_Air_5.usdz
+                  buildPhase: resources
+                - path: SalaAR/iphone_16e.usdz
+                  buildPhase: resources
               settings:
                 base:
                   PRODUCT_BUNDLE_IDENTIFIER: com.diploma.SalaAR

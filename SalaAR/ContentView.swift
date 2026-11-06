@@ -21,6 +21,30 @@ struct BeaconPoint: Identifiable {
     var distance: Double? = nil
 }
 
+enum PlaceableModel: String, CaseIterable, Identifiable {
+    case ipad = "Ipad_Air_5"
+    case iphone = "iphone_16e"
+    case nxp = "nxp"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .ipad: return "iPad"
+        case .iphone: return "iPhone"
+        case .nxp: return "NXP"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .ipad: return "ipad"
+        case .iphone: return "iphone"
+        case .nxp: return "cpu"
+        }
+    }
+}
+
 struct ContentView: View {
 
     @StateObject private var locationManager = LocationManager()
@@ -28,6 +52,9 @@ struct ContentView: View {
     @State private var points: [BeaconPoint] = [
         BeaconPoint(name: "Door", major: 1, minor: 100)
     ]
+
+    @State private var selectedModel: PlaceableModel = .nxp
+    @State private var isModelPickerPresented: Bool = false
 
     private var isNearDoorBeacon: Bool {
         points.first(where: { $0.major == 1 && $0.minor == 100 })?.found ?? false
@@ -40,25 +67,105 @@ struct ContentView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            ARViewContainer(showBoard: isNearDoorBeacon)
-                .ignoresSafeArea()
+        ZStack {
+            ARViewContainer(
+                showBoard: isNearDoorBeacon,
+                selectedModelName: selectedModel.rawValue
+            )
+            .ignoresSafeArea()
 
-            Group {
-                if let nearest = nearestBeaconPoint, let distance = nearest.distance {
-                    Text(String(format: "Najbliższy beacon (%@): %.2f m", nearest.name, distance))
+            VStack {
+                HStack {
+                    Group {
+                        if let nearest = nearestBeaconPoint, let distance = nearest.distance {
+                            Text(String(format: "Najbliższy beacon (%@): %.2f m", nearest.name, distance))
+                        } else {
+                            Text("Najbliższy beacon: brak w zasięgu")
+                        }
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.black.opacity(0.6))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+
+                    Spacer()
+                }
+                .padding(.top, 16)
+                .padding(.horizontal, 16)
+
+                Spacer()
+
+                if isModelPickerPresented {
+                    VStack(spacing: 12) {
+                        HStack {
+                            Text("Wybierz model")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Spacer()
+                            Button {
+                                withAnimation {
+                                    isModelPickerPresented = false
+                                }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.title3)
+                                    .foregroundColor(.white.opacity(0.8))
+                            }
+                        }
+
+                        HStack(spacing: 12) {
+                            ForEach(PlaceableModel.allCases) { model in
+                                Button {
+                                    selectedModel = model
+                                    withAnimation {
+                                        isModelPickerPresented = false
+                                    }
+                                } label: {
+                                    VStack(spacing: 8) {
+                                        Image(systemName: model.iconName)
+                                            .font(.title2)
+                                        Text(model.title)
+                                            .font(.subheadline.weight(.medium))
+                                    }
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                                    .background(
+                                        selectedModel == model
+                                            ? Color.blue.opacity(0.85)
+                                            : Color.white.opacity(0.18)
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                                }
+                            }
+                        }
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.black.opacity(0.8))
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
                 } else {
-                    Text("Najbliższy beacon: brak w zasięgu")
+                    Button {
+                        withAnimation {
+                            isModelPickerPresented = true
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Image(systemName: selectedModel.iconName)
+                            Text("Model: \(selectedModel.title)")
+                                .fontWeight(.semibold)
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 12)
+                        .background(Color.black.opacity(0.75))
+                        .clipShape(Capsule())
+                    }
+                    .padding(.bottom, 24)
                 }
             }
-            .font(.subheadline.weight(.semibold))
-            .foregroundColor(.white)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(Color.black.opacity(0.6))
-            .clipShape(RoundedRectangle(cornerRadius: 10))
-            .padding(.top, 16)
-            .padding(.leading, 16)
         }
         .onReceive(locationManager.$detectedBeacons) { beacons in
             update(beacons: beacons)
@@ -96,6 +203,7 @@ struct ContentView: View {
 
 struct ARViewContainer: UIViewRepresentable {
     var showBoard: Bool
+    var selectedModelName: String
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -117,12 +225,14 @@ struct ARViewContainer: UIViewRepresentable {
         )
         arView.addGestureRecognizer(tapGesture)
         context.coordinator.arView = arView
+        context.coordinator.selectedModelName = selectedModelName
         context.coordinator.updateBoardState(showBoard: showBoard)
 
         return arView
     }
 
     func updateUIView(_ uiView: ARView, context: Context) {
+        context.coordinator.selectedModelName = selectedModelName
         context.coordinator.updateBoardState(showBoard: showBoard)
     }
 
@@ -130,6 +240,7 @@ struct ARViewContainer: UIViewRepresentable {
 
     class Coordinator: NSObject, ARSessionDelegate {
         weak var arView: ARView?
+        var selectedModelName: String = PlaceableModel.nxp.rawValue
         private var showBoard: Bool = false
         private var boardAnchor: AnchorEntity?
 
@@ -153,7 +264,7 @@ struct ARViewContainer: UIViewRepresentable {
             if let anchors = arView.session.currentFrame?.anchors {
                 for anchor in anchors {
                     if let planeAnchor = anchor as? ARPlaneAnchor, planeAnchor.alignment == .vertical {
-                        let board = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                        let board = BoardEntity(uiImage: "rozklad", scale: 2.0)
                         boardAnchor = place(
                             board,
                             transform: planeAnchor.transform,
@@ -211,7 +322,7 @@ struct ARViewContainer: UIViewRepresentable {
 
             switch planeAlignment {
             case .horizontal:
-                let customEntity = CustomModelEntity(modelName: "nxp", scale: 1.5)
+                let customEntity = CustomModelEntity(modelName: selectedModelName, scale: 1.5)
                 place(
                     customEntity,
                     transform: firstResult.worldTransform,
@@ -220,7 +331,7 @@ struct ARViewContainer: UIViewRepresentable {
                 )
             case .vertical:
                 guard showBoard, boardAnchor == nil else { return }
-                let boardEntity = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                let boardEntity = BoardEntity(uiImage: "rozklad", scale: 2.0)
                 boardAnchor = place(
                     boardEntity,
                     transform: firstResult.worldTransform,
