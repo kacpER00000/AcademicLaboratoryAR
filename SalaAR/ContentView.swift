@@ -7,6 +7,7 @@ import Combine
 enum BeaconConfig {
     static let maxDistance: Double = 12.0
     static let far: Double = 8.0
+    static let boardTriggerDistance: Double = 5.0
     static let close: Double = 4.0
     static let veryClose: Double = 2.0
 }
@@ -23,7 +24,6 @@ struct BeaconPoint: Identifiable {
 struct ContentView: View {
 
     @StateObject private var locationManager = LocationManager()
-    @AppStorage("foundThreshold") private var foundThreshold: Double = 0.7
 
     @State private var points: [BeaconPoint] = [
         BeaconPoint(name: "Door", major: 1, minor: 100)
@@ -33,12 +33,36 @@ struct ContentView: View {
         points.first(where: { $0.major == 1 && $0.minor == 100 })?.found ?? false
     }
 
+    private var nearestBeaconPoint: BeaconPoint? {
+        points
+            .filter { $0.distance != nil }
+            .min(by: { ($0.distance ?? .greatestFiniteMagnitude) < ($1.distance ?? .greatestFiniteMagnitude) })
+    }
+
     var body: some View {
-        ARViewContainer(showBoard: isNearDoorBeacon)
-            .ignoresSafeArea()
-            .onReceive(locationManager.$detectedBeacons) { beacons in
-                update(beacons: beacons)
+        ZStack(alignment: .topLeading) {
+            ARViewContainer(showBoard: isNearDoorBeacon)
+                .ignoresSafeArea()
+
+            Group {
+                if let nearest = nearestBeaconPoint, let distance = nearest.distance {
+                    Text(String(format: "Najbliższy beacon (%@): %.2f m", nearest.name, distance))
+                } else {
+                    Text("Najbliższy beacon: brak w zasięgu")
+                }
             }
+            .font(.subheadline.weight(.semibold))
+            .foregroundColor(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.6))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .padding(.top, 16)
+            .padding(.leading, 16)
+        }
+        .onReceive(locationManager.$detectedBeacons) { beacons in
+            update(beacons: beacons)
+        }
     }
 
     private func update(beacons: [CLBeacon]) {
@@ -64,7 +88,7 @@ struct ContentView: View {
                     continue
                 }
 
-                self.points[index].found = d < self.foundThreshold
+                self.points[index].found = d <= BeaconConfig.boardTriggerDistance
             }
         }
     }
