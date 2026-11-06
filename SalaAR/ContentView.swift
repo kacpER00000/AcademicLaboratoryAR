@@ -1,21 +1,84 @@
 import SwiftUI
 import RealityKit
 import ARKit
+import CoreLocation
+import Combine
+
+enum BeaconConfig {
+    static let maxDistance: Double = 12.0
+    static let far: Double = 8.0
+    static let close: Double = 4.0
+    static let veryClose: Double = 2.0
+}
+
+struct BeaconPoint: Identifiable {
+    let id = UUID()
+    let name: String
+    let major: Int
+    let minor: Int
+    var found: Bool = false
+    var distance: Double? = nil
+}
 
 struct ContentView: View {
+
+    @StateObject private var locationManager = LocationManager()
+    @AppStorage("foundThreshold") private var foundThreshold: Double = 0.7
+
+    @State private var points: [BeaconPoint] = [
+        BeaconPoint(name: "Door", major: 1, minor: 100)
+    ]
+
+    private var isNearDoorBeacon: Bool {
+        points.first(where: { $0.major == 1 && $0.minor == 100 })?.found ?? false
+    }
+
     var body: some View {
-        ARViewContainer()
+        ARViewContainer(showBoard: isNearDoorBeacon)
             .ignoresSafeArea()
+            .onReceive(locationManager.$detectedBeacons) { beacons in
+                update(beacons: beacons)
+            }
+    }
+
+    private func update(beacons: [CLBeacon]) {
+        DispatchQueue.main.async {
+            for index in self.points.indices {
+                let point = self.points[index]
+
+                guard let beacon = beacons.first(where: {
+                    $0.major.intValue == point.major &&
+                    $0.minor.intValue == point.minor
+                }) else {
+                    self.points[index].distance = nil
+                    self.points[index].found = false
+                    continue
+                }
+
+                let rawDistance = self.locationManager.filteredDistance(for: beacon) ?? beacon.accuracy
+                let distance = rawDistance > 0 ? rawDistance : nil
+                self.points[index].distance = distance
+
+                guard let d = distance else {
+                    self.points[index].found = false
+                    continue
+                }
+
+                self.points[index].found = d < self.foundThreshold
+            }
+        }
     }
 }
 
 struct ARViewContainer: UIViewRepresentable {
+    var showBoard: Bool
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
 
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal, .vertical]
+        arView.session.delegate = context.coordinator
         arView.session.run(config)
 
         let coaching = ARCoachingOverlayView()
@@ -30,16 +93,82 @@ struct ARViewContainer: UIViewRepresentable {
         )
         arView.addGestureRecognizer(tapGesture)
         context.coordinator.arView = arView
+        context.coordinator.updateBoardState(showBoard: showBoard)
 
         return arView
     }
 
-    func updateUIView(_ uiView: ARView, context: Context) {}
+    func updateUIView(_ uiView: ARView, context: Context) {
+        context.coordinator.updateBoardState(showBoard: showBoard)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    class Coordinator: NSObject {
+    class Coordinator: NSObject, ARSessionDelegate {
         weak var arView: ARView?
+        private var showBoard: Bool = false
+        private var boardAnchor: AnchorEntity?
+
+        func updateBoardState(showBoard: Bool) {
+            self.showBoard = showBoard
+            if showBoard {
+                tryPlaceBoardOnExistingVerticalPlane()
+            } else {
+                removeBoard()
+            }
+        }
+
+        private func removeBoard() {
+            boardAnchor?.removeFromParent()
+            boardAnchor = nil
+        }
+
+        private func tryPlaceBoardOnExistingVerticalPlane() {
+            guard showBoard, boardAnchor == nil, let arView = arView else { return }
+
+            if let anchors = arView.session.currentFrame?.anchors {
+                for anchor in anchors {
+                    if let planeAnchor = anchor as? ARPlaneAnchor, planeAnchor.alignment == .vertical {
+                        let board = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                        boardAnchor = place(
+                            board,
+                            transform: planeAnchor.transform,
+                            planeAlignment: .vertical,
+                            in: arView
+                        )
+                        if boardAnchor != nil { return }
+                    }
+                }
+            }
+        }
+
+        nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
+            handleDetectedAnchors(anchors)
+        }
+
+        nonisolated func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+            handleDetectedAnchors(anchors)
+        }
+
+        private nonisolated func handleDetectedAnchors(_ anchors: [ARAnchor]) {
+            let verticalTransform = anchors
+                .compactMap { $0 as? ARPlaneAnchor }
+                .first(where: { $0.alignment == .vertical })?
+                .transform
+
+            guard let transform = verticalTransform else { return }
+
+            Task { @MainActor in
+                guard self.showBoard, self.boardAnchor == nil, let arView = self.arView else { return }
+                let board = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                self.boardAnchor = self.place(
+                    board,
+                    transform: transform,
+                    planeAlignment: .vertical,
+                    in: arView
+                )
+            }
+        }
 
         @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
             guard let arView = arView else { return }
@@ -56,17 +185,27 @@ struct ARViewContainer: UIViewRepresentable {
             guard let firstResult = results.first,
                   let planeAlignment = alignment(for: firstResult) else { return }
 
-            let entity: PlaceableEntity
             switch planeAlignment {
             case .horizontal:
-                entity = CustomModelEntity(modelName: "nxp", scale: 1.5)
+                let customEntity = CustomModelEntity(modelName: "nxp", scale: 1.5)
+                place(
+                    customEntity,
+                    transform: firstResult.worldTransform,
+                    planeAlignment: planeAlignment,
+                    in: arView
+                )
             case .vertical:
-                entity = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                guard showBoard, boardAnchor == nil else { return }
+                let boardEntity = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                boardAnchor = place(
+                    boardEntity,
+                    transform: firstResult.worldTransform,
+                    planeAlignment: planeAlignment,
+                    in: arView
+                )
             @unknown default:
                 return
             }
-
-            place(entity, at: firstResult, planeAlignment: planeAlignment, in: arView)
         }
 
         private func alignment(for result: ARRaycastResult) -> ARPlaneAnchor.Alignment? {
@@ -83,20 +222,22 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
+        @discardableResult
         private func place(
             _ entity: PlaceableEntity,
-            at result: ARRaycastResult,
+            transform: simd_float4x4,
             planeAlignment: ARPlaneAnchor.Alignment,
             in arView: ARView
-        ) {
-            guard entity.allowedAlignment == planeAlignment else { return }
+        ) -> AnchorEntity? {
+            guard entity.allowedAlignment == planeAlignment else { return nil }
 
-            let anchor = AnchorEntity(world: result.worldTransform)
+            let anchor = AnchorEntity(world: transform)
             anchor.addChild(entity)
             arView.scene.addAnchor(anchor)
 
             // Obrót dwoma palcami, przesuwanie jednym, skalowanie "pinch"
             arView.installGestures([.rotation, .translation, .scale], for: entity)
+            return anchor
         }
     }
 }

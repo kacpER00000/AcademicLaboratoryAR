@@ -13,8 +13,8 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     
     @Published var detectedBeacons: [CLBeacon] = []
     private var locationManager: CLLocationManager?
-    private let beaconUUID = UUID(uuidString: "B9407F30-F5F8-466E-AFF9-25556B57FE6D")!
-    private let beaconIdentifier = "edu.tarnow.nocnaukowcow"
+    private let beaconUUID = UUID(uuidString: "E2C56DB5-DFFB-48D2-B060-D0F5A71096E0")!
+    private let beaconIdentifier = "moj.beacon"
     private var distanceFilter: [String: Double] = [:]
     private let alpha: Double = 0.25
     private var isResetting = false
