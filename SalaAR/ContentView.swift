@@ -43,6 +43,13 @@ enum PlaceableModel: String, CaseIterable, Identifiable {
         case .nxp: return "cpu"
         }
     }
+
+    var scale: Float {
+        switch self {
+        case .ipad, .iphone: return 0.5
+        case .nxp: return 1.5
+        }
+    }
 }
 
 struct ContentView: View {
@@ -70,7 +77,7 @@ struct ContentView: View {
         ZStack {
             ARViewContainer(
                 showBoard: isNearDoorBeacon,
-                selectedModelName: selectedModel.rawValue
+                selectedModel: selectedModel
             )
             .ignoresSafeArea()
 
@@ -203,7 +210,7 @@ struct ContentView: View {
 
 struct ARViewContainer: UIViewRepresentable {
     var showBoard: Bool
-    var selectedModelName: String
+    var selectedModel: PlaceableModel
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -225,14 +232,14 @@ struct ARViewContainer: UIViewRepresentable {
         )
         arView.addGestureRecognizer(tapGesture)
         context.coordinator.arView = arView
-        context.coordinator.selectedModelName = selectedModelName
+        context.coordinator.selectedModel = selectedModel
         context.coordinator.updateBoardState(showBoard: showBoard)
 
         return arView
     }
 
     func updateUIView(_ uiView: ARView, context: Context) {
-        context.coordinator.selectedModelName = selectedModelName
+        context.coordinator.selectedModel = selectedModel
         context.coordinator.updateBoardState(showBoard: showBoard)
     }
 
@@ -240,7 +247,7 @@ struct ARViewContainer: UIViewRepresentable {
 
     class Coordinator: NSObject, ARSessionDelegate {
         weak var arView: ARView?
-        var selectedModelName: String = PlaceableModel.nxp.rawValue
+        var selectedModel: PlaceableModel = .nxp
         private var showBoard: Bool = false
         private var boardAnchor: AnchorEntity?
 
@@ -322,7 +329,10 @@ struct ARViewContainer: UIViewRepresentable {
 
             switch planeAlignment {
             case .horizontal:
-                let customEntity = CustomModelEntity(modelName: selectedModelName, scale: 1.5)
+                let customEntity = CustomModelEntity(
+                    modelName: selectedModel.rawValue,
+                    scale: selectedModel.scale
+                )
                 place(
                     customEntity,
                     transform: firstResult.worldTransform,
