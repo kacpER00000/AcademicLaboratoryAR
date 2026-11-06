@@ -15,12 +15,12 @@ struct ARViewContainer: UIViewRepresentable {
         let arView = ARView(frame: .zero)
 
         let config = ARWorldTrackingConfiguration()
-        config.planeDetection = [.horizontal]
+        config.planeDetection = [.horizontal, .vertical]
         arView.session.run(config)
 
         let coaching = ARCoachingOverlayView()
         coaching.session = arView.session
-        coaching.goal = .horizontalPlane
+        coaching.goal = .anyPlane
         coaching.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         arView.addSubview(coaching)
 
@@ -50,18 +50,53 @@ struct ARViewContainer: UIViewRepresentable {
             let results = arView.raycast(
                 from: tapLocation,
                 allowing: .estimatedPlane,
-                alignment: .horizontal
+                alignment: .any
             )
 
-            guard let firstResult = results.first else { return }
+            guard let firstResult = results.first,
+                  let planeAlignment = alignment(for: firstResult) else { return }
 
-            let anchor = AnchorEntity(world: firstResult.worldTransform)
-            let customEntity = CustomModelEntity(modelName: "nxp", scale: 1.5)
-            anchor.addChild(customEntity)
+            let entity: PlaceableEntity
+            switch planeAlignment {
+            case .horizontal:
+                entity = CustomModelEntity(modelName: "nxp", scale: 1.5)
+            case .vertical:
+                entity = BoardEntity(uiImage: "rozklad", scale: 1.0)
+            @unknown default:
+                return
+            }
+
+            place(entity, at: firstResult, planeAlignment: planeAlignment, in: arView)
+        }
+
+        private func alignment(for result: ARRaycastResult) -> ARPlaneAnchor.Alignment? {
+            if let planeAnchor = result.anchor as? ARPlaneAnchor {
+                return planeAnchor.alignment
+            }
+            switch result.targetAlignment {
+            case .horizontal:
+                return .horizontal
+            case .vertical:
+                return .vertical
+            default:
+                return nil
+            }
+        }
+
+        private func place(
+            _ entity: PlaceableEntity,
+            at result: ARRaycastResult,
+            planeAlignment: ARPlaneAnchor.Alignment,
+            in arView: ARView
+        ) {
+            guard entity.allowedAlignment == planeAlignment else { return }
+
+            let anchor = AnchorEntity(world: result.worldTransform)
+            anchor.addChild(entity)
             arView.scene.addAnchor(anchor)
 
             // Obrót dwoma palcami, przesuwanie jednym, skalowanie "pinch"
-            arView.installGestures([.rotation, .translation, .scale], for: customEntity)
+            arView.installGestures([.rotation, .translation, .scale], for: entity)
         }
     }
 }

@@ -1,8 +1,12 @@
 import RealityKit
+import ARKit
 
 /// Encja ładująca model .usdz z paczki aplikacji.
 /// HasCollision jest wymagane, żeby działały gesty (installGestures).
-class CustomModelEntity: Entity, HasCollision {
+class CustomModelEntity: Entity, HasCollision, PlaceableEntity {
+    var allowedAlignment: ARPlaneAnchor.Alignment {
+        return .horizontal
+    }
 
     /// Wymagany przez RealityKit
     required init() {
