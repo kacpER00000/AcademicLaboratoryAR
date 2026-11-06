@@ -1,0 +1,140 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Build Unsigned .ipa
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select latest available Xcode
+        run: |
+          if [ -d "/Applications" ]; then
+            LATEST_XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -n 1)
+            if [ -n "$LATEST_XCODE" ]; then
+              echo "Using Xcode: $LATEST_XCODE"
+              sudo xcode-select -s "$LATEST_XCODE/Contents/Developer"
+            fi
+          fi
+          xcodebuild -version
+
+      - name: Locate project directory and prepare Xcode project
+        id: prepare
+        run: |
+          if [ -d "SalaAR.xcodeproj" ]; then
+            PROJECT_DIR="."
+          elif [ -d "SalaAR/SalaAR.xcodeproj" ]; then
+            PROJECT_DIR="SalaAR"
+          else
+            PROJECT_PATH=$(find . -maxdepth 3 -name "SalaAR.xcodeproj" | head -n 1)
+            PROJECT_DIR=$(dirname "$PROJECT_PATH")
+          fi
+
+          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          cd "$PROJECT_DIR"
+
+          # Sprawdź czy wersja Xcode na runnerze obsługuje format projektu (np. project.xcproj z nowszego Xcode).
+          # Jeśli nie zawiera project.pbxproj lub xcodebuild -list zwraca błąd, wygeneruj kompatybilny projekt przez XcodeGen.
+          if ! xcodebuild -list -project SalaAR.xcodeproj >/dev/null 2>&1; then
+            echo "Generowanie kompatybilnego pliku project.pbxproj za pomocą XcodeGen..."
+            if ! command -v xcodegen >/dev/null 2>&1; then
+              brew install xcodegen
+            fi
+
+            cat << 'EOF' > project.yml
+          name: SalaAR
+          options:
+            bundleIdPrefix: com.diploma
+            deploymentTarget:
+              iOS: "17.0"
+          settings:
+            base:
+              SWIFT_VERSION: "5.0"
+              TARGETED_DEVICE_FAMILY: "1,2"
+          targets:
+            SalaAR:
+              type: application
+              platform: iOS
+              sources:
+                - path: SalaAR
+                  excludes:
+                    - Info.plist
+                    - "*.usdz"
+                - path: SalaAR/nxp.usdz
+                  buildPhase: resources
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.diploma.SalaAR
+                  INFOPLIST_FILE: SalaAR/Info.plist
+                  GENERATE_INFOPLIST_FILE: YES
+                  ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+                  ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+                  INFOPLIST_KEY_NSCameraUsageDescription: "CAMERA_USAGE_DESCRIPTION"
+                  INFOPLIST_KEY_NSLocationWhenInUseUsageDescription: "LOCATION_USAGE_DESCRIPTION"
+                  INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+                  INFOPLIST_KEY_UILaunchScreen_Generation: YES
+                  INFOPLIST_KEY_UIRequiredDeviceCapabilities: arkit
+                  INFOPLIST_KEY_UIStatusBarHidden: YES
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+                  INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+                  ENABLE_PREVIEWS: YES
+          EOF
+
+            rm -rf SalaAR.xcodeproj
+            xcodegen generate
+          fi
+
+      - name: Build Archive (Unsigned)
+        working-directory: ${{ steps.prepare.outputs.project_dir }}
+        run: |
+          xcodebuild clean archive \
+            -project SalaAR.xcodeproj \
+            -scheme SalaAR \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/SalaAR.xcarchive" \
+            IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            DEVELOPMENT_TEAM=""
+
+      - name: Package .app into .ipa
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -r "$RUNNER_TEMP/SalaAR.xcarchive/Products/Applications/SalaAR.app" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -r "$GITHUB_WORKSPACE/SalaAR.ipa" Payload
+
+      - name: Upload .ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SalaAR-ipa
+          path: ${{ github.workspace }}/SalaAR.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach .ipa to GitHub Release (on tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/SalaAR.ipa
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
