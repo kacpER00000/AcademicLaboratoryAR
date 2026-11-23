@@ -46,7 +46,7 @@ enum PlaceableModel: String, CaseIterable, Identifiable {
 
     var scale: Float {
         switch self {
-        case .ipad, .iphone: return 0.5
+        case .ipad, .iphone: return 1.0
         case .nxp: return 1.5
         }
     }
