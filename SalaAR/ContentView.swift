@@ -36,6 +36,18 @@ struct BeaconPoint: Identifiable {
     }
 }
 
+private enum ActiveSheet: Identifiable {
+    case modelInfo(PlaceableModel)
+    case roomEquipment
+
+    var id: String {
+        switch self {
+        case .modelInfo(let model): return "model-\(model.id)"
+        case .roomEquipment: return "room-equipment"
+        }
+    }
+}
+
 struct ContentView: View {
 
     @StateObject private var locationManager = LocationManager()
@@ -46,8 +58,8 @@ struct ContentView: View {
 
     @State private var selectedModel: PlaceableModel = .nxp
     @State private var isModelPickerPresented: Bool = false
-    @State private var inspectedModel: PlaceableModel? = nil
-    @State private var inspectedModelFromBeacon: Bool = false
+    @State private var activeSheet: ActiveSheet? = nil
+    @State private var activeSheetFromStationBeacon: Bool = false
 
     private var isNearDoorBeacon: Bool {
         points.first(where: { $0.isDoor })?.found ?? false
@@ -72,8 +84,12 @@ struct ContentView: View {
                 activeStationBeaconKey: activeStationBeacon?.key,
                 selectedModel: selectedModel,
                 onSelectModelInfo: { model, fromBeacon in
-                    inspectedModel = model
-                    inspectedModelFromBeacon = fromBeacon
+                    activeSheet = .modelInfo(model)
+                    activeSheetFromStationBeacon = fromBeacon
+                },
+                onSelectBoardInfo: {
+                    activeSheet = .roomEquipment
+                    activeSheetFromStationBeacon = false
                 }
             )
             .ignoresSafeArea()
@@ -96,6 +112,19 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
 
                         Spacer()
+                    }
+
+                    if isNearDoorBeacon {
+                        HStack(spacing: 6) {
+                            Image(systemName: "hand.tap.fill")
+                            Text("Kliknij na plan, aby zobaczyć wyposażenie sali Apple")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color(red: 0.08, green: 0.20, blue: 0.44).opacity(0.9))
+                        .clipShape(Capsule())
                     }
 
                     if activeStationBeacon != nil {
@@ -186,19 +215,34 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(item: $inspectedModel) { model in
-            ModelInfoSheet(model: model) {
-                inspectedModel = nil
-                inspectedModelFromBeacon = false
+        .sheet(item: $activeSheet) { sheet in
+            Group {
+                switch sheet {
+                case .modelInfo(let model):
+                    ModelInfoSheet(model: model) {
+                        activeSheet = nil
+                        activeSheetFromStationBeacon = false
+                    }
+                case .roomEquipment:
+                    RoomEquipmentSheet {
+                        activeSheet = nil
+                    }
+                }
             }
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
         .onChange(of: activeStationBeacon?.key) { _, newValue in
             // Gdy odejdziemy od beacona, zamknij również otwarte informacje o jego modelach
-            if newValue == nil && inspectedModelFromBeacon {
-                inspectedModel = nil
-                inspectedModelFromBeacon = false
+            if newValue == nil && activeSheetFromStationBeacon {
+                activeSheet = nil
+                activeSheetFromStationBeacon = false
+            }
+        }
+        .onChange(of: isNearDoorBeacon) { _, isNear in
+            // Gdy odejdziemy od drzwi, zamknij również otwarty podgląd wyposażenia sali
+            if !isNear, case .roomEquipment = activeSheet {
+                activeSheet = nil
             }
         }
         .onReceive(locationManager.$detectedBeacons) { beacons in
@@ -266,6 +310,7 @@ struct ARViewContainer: UIViewRepresentable {
     var activeStationBeaconKey: String?
     var selectedModel: PlaceableModel
     var onSelectModelInfo: (PlaceableModel, Bool) -> Void
+    var onSelectBoardInfo: () -> Void
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -289,6 +334,7 @@ struct ARViewContainer: UIViewRepresentable {
         context.coordinator.arView = arView
         context.coordinator.selectedModel = selectedModel
         context.coordinator.onSelectModelInfo = onSelectModelInfo
+        context.coordinator.onSelectBoardInfo = onSelectBoardInfo
         context.coordinator.updateBoardState(showBoard: showBoard)
         context.coordinator.updateStationState(activeBeaconKey: activeStationBeaconKey)
 
@@ -298,6 +344,7 @@ struct ARViewContainer: UIViewRepresentable {
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.selectedModel = selectedModel
         context.coordinator.onSelectModelInfo = onSelectModelInfo
+        context.coordinator.onSelectBoardInfo = onSelectBoardInfo
         context.coordinator.updateBoardState(showBoard: showBoard)
         context.coordinator.updateStationState(activeBeaconKey: activeStationBeaconKey)
     }
@@ -308,6 +355,7 @@ struct ARViewContainer: UIViewRepresentable {
         weak var arView: ARView?
         var selectedModel: PlaceableModel = .nxp
         var onSelectModelInfo: ((PlaceableModel, Bool) -> Void)?
+        var onSelectBoardInfo: (() -> Void)?
 
         private var showBoard: Bool = false
         private var boardAnchor: AnchorEntity?
@@ -525,7 +573,7 @@ struct ARViewContainer: UIViewRepresentable {
                 guard let arView = self.arView else { return }
 
                 if let vTransform = verticalTransform, self.showBoard, self.boardAnchor == nil {
-                    let board = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                    let board = BoardEntity(uiImage: "rozklad", scale: 2.0)
                     if let placed = self.place(
                         board,
                         transform: vTransform,
@@ -554,6 +602,12 @@ struct ARViewContainer: UIViewRepresentable {
             if let tappedModel = hitEntities.compactMap({ findModelEntity(from: $0) }).first,
                let modelType = tappedModel.modelType {
                 onSelectModelInfo?(modelType, tappedModel.isBeaconOwned)
+                return
+            }
+
+            // 2. Kliknięcie na plan zajęć -> pokaż wyposażenie sali Apple
+            if hitEntities.contains(where: { findBoardEntity(from: $0) != nil }) {
+                onSelectBoardInfo?()
                 return
             }
 
@@ -600,6 +654,17 @@ struct ARViewContainer: UIViewRepresentable {
             while let node = current {
                 if let modelEntity = node as? CustomModelEntity {
                     return modelEntity
+                }
+                current = node.parent
+            }
+            return nil
+        }
+
+        private func findBoardEntity(from entity: Entity?) -> BoardEntity? {
+            var current = entity
+            while let node = current {
+                if let boardEntity = node as? BoardEntity {
+                    return boardEntity
                 }
                 current = node.parent
             }
