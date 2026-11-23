@@ -416,24 +416,55 @@ struct ARViewContainer: UIViewRepresentable {
             placedStationBeaconKey = nil
         }
 
+        private func elevatedBoardTransform(
+            from transform: simd_float4x4,
+            in arView: ARView
+        ) -> simd_float4x4 {
+            var adjusted = transform
+            let planeY = transform.columns.3.y
+
+            if let cameraY = arView.session.currentFrame?.camera.transform.columns.3.y {
+                // Ustaw plan wyżej — w okolicach linii wzroku / górnej części drzwi
+                let minPreferredY = cameraY + 0.20
+                let maxPreferredY = cameraY + 0.45
+                adjusted.columns.3.y = min(max(planeY, minPreferredY), maxPreferredY)
+            } else {
+                adjusted.columns.3.y = planeY + 0.25
+            }
+
+            return adjusted
+        }
+
         private func tryPlaceBoardOnExistingVerticalPlane() {
             guard showBoard, boardAnchor == nil, let arView = arView else { return }
 
-            if let anchors = arView.session.currentFrame?.anchors {
-                for anchor in anchors {
-                    if let planeAnchor = anchor as? ARPlaneAnchor, planeAnchor.alignment == .vertical {
-                        let board = BoardEntity(uiImage: "rozklad", scale: 2.0)
-                        if let placed = place(
-                            board,
-                            transform: planeAnchor.transform,
-                            planeAlignment: .vertical,
-                            in: arView
-                        ) {
-                            boardAnchor = placed.anchor
-                            boardGestures = placed.gestures
-                            return
-                        }
-                    }
+            guard let frame = arView.session.currentFrame else { return }
+            let cameraPos = SIMD3<Float>(
+                frame.camera.transform.columns.3.x,
+                frame.camera.transform.columns.3.y,
+                frame.camera.transform.columns.3.z
+            )
+
+            let nearestVerticalPlane = frame.anchors
+                .compactMap { $0 as? ARPlaneAnchor }
+                .filter { $0.alignment == .vertical }
+                .min { lhs, rhs in
+                    let lhsPos = SIMD3<Float>(lhs.transform.columns.3.x, lhs.transform.columns.3.y, lhs.transform.columns.3.z)
+                    let rhsPos = SIMD3<Float>(rhs.transform.columns.3.x, rhs.transform.columns.3.y, rhs.transform.columns.3.z)
+                    return simd_distance(cameraPos, lhsPos) < simd_distance(cameraPos, rhsPos)
+                }
+
+            if let planeAnchor = nearestVerticalPlane {
+                let board = BoardEntity(uiImage: "rozklad", scale: 2.0)
+                let adjustedTransform = elevatedBoardTransform(from: planeAnchor.transform, in: arView)
+                if let placed = place(
+                    board,
+                    transform: adjustedTransform,
+                    planeAlignment: .vertical,
+                    in: arView
+                ) {
+                    boardAnchor = placed.anchor
+                    boardGestures = placed.gestures
                 }
             }
         }
@@ -574,9 +605,10 @@ struct ARViewContainer: UIViewRepresentable {
 
                 if let vTransform = verticalTransform, self.showBoard, self.boardAnchor == nil {
                     let board = BoardEntity(uiImage: "rozklad", scale: 2.0)
+                    let adjustedTransform = self.elevatedBoardTransform(from: vTransform, in: arView)
                     if let placed = self.place(
                         board,
-                        transform: vTransform,
+                        transform: adjustedTransform,
                         planeAlignment: .vertical,
                         in: arView
                     ) {
