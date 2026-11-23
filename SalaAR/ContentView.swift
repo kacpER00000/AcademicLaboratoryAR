@@ -5,9 +5,15 @@ import CoreLocation
 import Combine
 
 enum BeaconConfig {
+    static let doorMajor: Int = 1
+    static let doorMinor: Int = 100
+
     static let maxDistance: Double = 12.0
     static let far: Double = 8.0
     static let boardTriggerDistance: Double = 5.0
+    static let stationTriggerDistance: Double = 4.0
+    static let stationHideDistance: Double = 5.5
+    static let lostTimeout: TimeInterval = 3.0
     static let close: Double = 4.0
     static let veryClose: Double = 2.0
 }
@@ -19,36 +25,14 @@ struct BeaconPoint: Identifiable {
     let minor: Int
     var found: Bool = false
     var distance: Double? = nil
-}
+    var lastSeen: Date? = nil
 
-enum PlaceableModel: String, CaseIterable, Identifiable {
-    case ipad = "Ipad_Air_5"
-    case iphone = "iphone_16e"
-    case nxp = "nxp"
-
-    var id: String { rawValue }
-
-    var title: String {
-        switch self {
-        case .ipad: return "iPad"
-        case .iphone: return "iPhone"
-        case .nxp: return "NXP"
-        }
+    var key: String {
+        "\(major)-\(minor)"
     }
 
-    var iconName: String {
-        switch self {
-        case .ipad: return "ipad"
-        case .iphone: return "iphone"
-        case .nxp: return "cpu"
-        }
-    }
-
-    var scale: Float {
-        switch self {
-        case .ipad, .iphone: return 1.0
-        case .nxp: return 1.5
-        }
+    var isDoor: Bool {
+        major == BeaconConfig.doorMajor && minor == BeaconConfig.doorMinor
     }
 }
 
@@ -57,14 +41,22 @@ struct ContentView: View {
     @StateObject private var locationManager = LocationManager()
 
     @State private var points: [BeaconPoint] = [
-        BeaconPoint(name: "Door", major: 1, minor: 100)
+        BeaconPoint(name: "Door", major: BeaconConfig.doorMajor, minor: BeaconConfig.doorMinor)
     ]
 
     @State private var selectedModel: PlaceableModel = .nxp
     @State private var isModelPickerPresented: Bool = false
+    @State private var inspectedModel: PlaceableModel? = nil
+    @State private var inspectedModelFromBeacon: Bool = false
 
     private var isNearDoorBeacon: Bool {
-        points.first(where: { $0.major == 1 && $0.minor == 100 })?.found ?? false
+        points.first(where: { $0.isDoor })?.found ?? false
+    }
+
+    private var activeStationBeacon: BeaconPoint? {
+        points
+            .filter { !$0.isDoor && $0.found }
+            .min(by: { ($0.distance ?? .greatestFiniteMagnitude) < ($1.distance ?? .greatestFiniteMagnitude) })
     }
 
     private var nearestBeaconPoint: BeaconPoint? {
@@ -77,27 +69,47 @@ struct ContentView: View {
         ZStack {
             ARViewContainer(
                 showBoard: isNearDoorBeacon,
-                selectedModel: selectedModel
+                activeStationBeaconKey: activeStationBeacon?.key,
+                selectedModel: selectedModel,
+                onSelectModelInfo: { model, fromBeacon in
+                    inspectedModel = model
+                    inspectedModelFromBeacon = fromBeacon
+                }
             )
             .ignoresSafeArea()
 
             VStack {
-                HStack {
-                    Group {
-                        if let nearest = nearestBeaconPoint, let distance = nearest.distance {
-                            Text(String(format: "Najbliższy beacon (%@): %.2f m", nearest.name, distance))
-                        } else {
-                            Text("Najbliższy beacon: brak w zasięgu")
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Group {
+                            if let nearest = nearestBeaconPoint, let distance = nearest.distance {
+                                Text(String(format: "Najbliższy beacon (%@): %.2f m", nearest.name, distance))
+                            } else {
+                                Text("Najbliższy beacon: brak w zasięgu")
+                            }
                         }
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color.black.opacity(0.6))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
 
-                    Spacer()
+                        Spacer()
+                    }
+
+                    if activeStationBeacon != nil {
+                        HStack(spacing: 6) {
+                            Image(systemName: "hand.tap.fill")
+                            Text("Kliknij na model, aby zobaczyć informacje")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.blue.opacity(0.75))
+                        .clipShape(Capsule())
+                    }
                 }
                 .padding(.top, 16)
                 .padding(.horizontal, 16)
@@ -174,6 +186,21 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(item: $inspectedModel) { model in
+            ModelInfoSheet(model: model) {
+                inspectedModel = nil
+                inspectedModelFromBeacon = false
+            }
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
+        .onChange(of: activeStationBeacon?.key) { _, newValue in
+            // Gdy odejdziemy od beacona, zamknij również otwarte informacje o jego modelach
+            if newValue == nil && inspectedModelFromBeacon {
+                inspectedModel = nil
+                inspectedModelFromBeacon = false
+            }
+        }
         .onReceive(locationManager.$detectedBeacons) { beacons in
             update(beacons: beacons)
         }
@@ -181,6 +208,19 @@ struct ContentView: View {
 
     private func update(beacons: [CLBeacon]) {
         DispatchQueue.main.async {
+            let now = Date()
+
+            // Dodaj automatycznie każdy wykryty beacon, który nie jest jeszcze na liście
+            for beacon in beacons {
+                let major = beacon.major.intValue
+                let minor = beacon.minor.intValue
+                if !self.points.contains(where: { $0.major == major && $0.minor == minor }) {
+                    let isDoor = (major == BeaconConfig.doorMajor && minor == BeaconConfig.doorMinor)
+                    let name = isDoor ? "Door" : "Stanowisko \(minor)"
+                    self.points.append(BeaconPoint(name: name, major: major, minor: minor))
+                }
+            }
+
             for index in self.points.indices {
                 let point = self.points[index]
 
@@ -188,6 +228,9 @@ struct ContentView: View {
                     $0.major.intValue == point.major &&
                     $0.minor.intValue == point.minor
                 }) else {
+                    if let lastSeen = point.lastSeen, now.timeIntervalSince(lastSeen) <= BeaconConfig.lostTimeout {
+                        continue
+                    }
                     self.points[index].distance = nil
                     self.points[index].found = false
                     continue
@@ -196,13 +239,23 @@ struct ContentView: View {
                 let rawDistance = self.locationManager.filteredDistance(for: beacon) ?? beacon.accuracy
                 let distance = rawDistance > 0 ? rawDistance : nil
                 self.points[index].distance = distance
+                self.points[index].lastSeen = now
 
                 guard let d = distance else {
                     self.points[index].found = false
                     continue
                 }
 
-                self.points[index].found = d <= BeaconConfig.boardTriggerDistance
+                if point.isDoor {
+                    self.points[index].found = d <= BeaconConfig.boardTriggerDistance
+                } else {
+                    // Histereza zapobiega migotaniu zestawu urządzeń na granicy zasięgu
+                    if self.points[index].found {
+                        self.points[index].found = d <= BeaconConfig.stationHideDistance
+                    } else {
+                        self.points[index].found = d <= BeaconConfig.stationTriggerDistance
+                    }
+                }
             }
         }
     }
@@ -210,7 +263,9 @@ struct ContentView: View {
 
 struct ARViewContainer: UIViewRepresentable {
     var showBoard: Bool
+    var activeStationBeaconKey: String?
     var selectedModel: PlaceableModel
+    var onSelectModelInfo: (PlaceableModel, Bool) -> Void
 
     func makeUIView(context: Context) -> ARView {
         let arView = ARView(frame: .zero)
@@ -233,14 +288,18 @@ struct ARViewContainer: UIViewRepresentable {
         arView.addGestureRecognizer(tapGesture)
         context.coordinator.arView = arView
         context.coordinator.selectedModel = selectedModel
+        context.coordinator.onSelectModelInfo = onSelectModelInfo
         context.coordinator.updateBoardState(showBoard: showBoard)
+        context.coordinator.updateStationState(activeBeaconKey: activeStationBeaconKey)
 
         return arView
     }
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.selectedModel = selectedModel
+        context.coordinator.onSelectModelInfo = onSelectModelInfo
         context.coordinator.updateBoardState(showBoard: showBoard)
+        context.coordinator.updateStationState(activeBeaconKey: activeStationBeaconKey)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -248,8 +307,16 @@ struct ARViewContainer: UIViewRepresentable {
     class Coordinator: NSObject, ARSessionDelegate {
         weak var arView: ARView?
         var selectedModel: PlaceableModel = .nxp
+        var onSelectModelInfo: ((PlaceableModel, Bool) -> Void)?
+
         private var showBoard: Bool = false
         private var boardAnchor: AnchorEntity?
+        private var boardGestures: [UIGestureRecognizer] = []
+
+        private var activeStationBeaconKey: String? = nil
+        private var placedStationBeaconKey: String? = nil
+        private var stationAnchor: AnchorEntity?
+        private var stationGestures: [UIGestureRecognizer] = []
 
         func updateBoardState(showBoard: Bool) {
             self.showBoard = showBoard
@@ -260,9 +327,45 @@ struct ARViewContainer: UIViewRepresentable {
             }
         }
 
+        func updateStationState(activeBeaconKey: String?) {
+            self.activeStationBeaconKey = activeBeaconKey
+
+            guard let beaconKey = activeBeaconKey else {
+                removeStationShowcase()
+                return
+            }
+
+            // Jeśli podeszliśmy do innego beacona, usuń poprzedni zestaw i pokaż go przy nowym stanowisku
+            if let placedKey = placedStationBeaconKey, placedKey != beaconKey {
+                removeStationShowcase()
+            }
+
+            if stationAnchor == nil {
+                tryPlaceStationShowcaseOnExistingHorizontalPlane()
+            }
+        }
+
         private func removeBoard() {
+            if let arView = arView {
+                for gesture in boardGestures {
+                    arView.removeGestureRecognizer(gesture)
+                }
+            }
+            boardGestures.removeAll()
             boardAnchor?.removeFromParent()
             boardAnchor = nil
+        }
+
+        private func removeStationShowcase() {
+            if let arView = arView {
+                for gesture in stationGestures {
+                    arView.removeGestureRecognizer(gesture)
+                }
+            }
+            stationGestures.removeAll()
+            stationAnchor?.removeFromParent()
+            stationAnchor = nil
+            placedStationBeaconKey = nil
         }
 
         private func tryPlaceBoardOnExistingVerticalPlane() {
@@ -272,16 +375,131 @@ struct ARViewContainer: UIViewRepresentable {
                 for anchor in anchors {
                     if let planeAnchor = anchor as? ARPlaneAnchor, planeAnchor.alignment == .vertical {
                         let board = BoardEntity(uiImage: "rozklad", scale: 2.0)
-                        boardAnchor = place(
+                        if let placed = place(
                             board,
                             transform: planeAnchor.transform,
                             planeAlignment: .vertical,
                             in: arView
-                        )
-                        if boardAnchor != nil { return }
+                        ) {
+                            boardAnchor = placed.anchor
+                            boardGestures = placed.gestures
+                            return
+                        }
                     }
                 }
             }
+        }
+
+        private func tryPlaceStationShowcaseOnExistingHorizontalPlane() {
+            guard let beaconKey = activeStationBeaconKey,
+                  stationAnchor == nil,
+                  let arView = arView else { return }
+
+            // 1. Preferuj płaszczyznę poziomą znajdującą się na środku ekranu (np. biurko przed użytkownikiem)
+            if arView.bounds.width > 0 && arView.bounds.height > 0 {
+                let center = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
+                if let result = arView.raycast(from: center, allowing: .existingPlaneGeometry, alignment: .horizontal).first
+                    ?? arView.raycast(from: center, allowing: .estimatedPlane, alignment: .horizontal).first {
+                    placeStationShowcase(at: result.worldTransform, for: beaconKey, in: arView)
+                    return
+                }
+            }
+
+            // 2. W przeciwnym razie wybierz najbliższą kamerze wykrytą płaszczyznę poziomą
+            guard let frame = arView.session.currentFrame else { return }
+            let cameraPos = SIMD3<Float>(
+                frame.camera.transform.columns.3.x,
+                frame.camera.transform.columns.3.y,
+                frame.camera.transform.columns.3.z
+            )
+
+            let nearestHorizontalPlane = frame.anchors
+                .compactMap { $0 as? ARPlaneAnchor }
+                .filter { $0.alignment == .horizontal }
+                .min { lhs, rhs in
+                    let lhsPos = SIMD3<Float>(lhs.transform.columns.3.x, lhs.transform.columns.3.y, lhs.transform.columns.3.z)
+                    let rhsPos = SIMD3<Float>(rhs.transform.columns.3.x, rhs.transform.columns.3.y, rhs.transform.columns.3.z)
+                    return simd_distance(cameraPos, lhsPos) < simd_distance(cameraPos, rhsPos)
+                }
+
+            if let plane = nearestHorizontalPlane {
+                placeStationShowcase(at: plane.transform, for: beaconKey, in: arView)
+            }
+        }
+
+        private func placeStationShowcase(
+            at transform: simd_float4x4,
+            for beaconKey: String,
+            in arView: ARView
+        ) {
+            let planePosition = SIMD3<Float>(
+                transform.columns.3.x,
+                transform.columns.3.y,
+                transform.columns.3.z
+            )
+
+            var anchorTransform = Transform(translation: planePosition)
+            if let cameraTransform = arView.session.currentFrame?.camera.transform {
+                let cameraPos = SIMD3<Float>(
+                    cameraTransform.columns.3.x,
+                    cameraTransform.columns.3.y,
+                    cameraTransform.columns.3.z
+                )
+                let dx = cameraPos.x - planePosition.x
+                let dz = cameraPos.z - planePosition.z
+                if hypot(dx, dz) > 0.01 {
+                    let yaw = atan2(dx, dz)
+                    anchorTransform.rotation = simd_quatf(angle: yaw, axis: [0, 1, 0])
+                }
+            }
+
+            let anchor = AnchorEntity(world: anchorTransform.matrix)
+
+            let nxpEntity = CustomModelEntity(model: .nxp, isBeaconOwned: true)
+            let iphoneEntity = CustomModelEntity(model: .iphone, isBeaconOwned: true)
+            let ipadEntity = CustomModelEntity(model: .ipad, isBeaconOwned: true)
+
+            let nxpBounds = nxpEntity.visualBounds(relativeTo: nxpEntity)
+            let iphoneBounds = iphoneEntity.visualBounds(relativeTo: iphoneEntity)
+            let ipadBounds = ipadEntity.visualBounds(relativeTo: ipadEntity)
+
+            let nxpWidth = max(nxpBounds.extents.x, 0.08)
+            let iphoneWidth = max(iphoneBounds.extents.x, 0.08)
+            let ipadWidth = max(ipadBounds.extents.x, 0.08)
+
+            let averageWidth = (nxpWidth + iphoneWidth + ipadWidth) / 3.0
+            let spacing = max(0.05, min(0.12, averageWidth * 0.3))
+
+            // Ustawienie koło siebie: płytka NXP (lewo), iPhone (środek), iPad (prawo)
+            nxpEntity.position = SIMD3<Float>(
+                -(iphoneWidth / 2 + spacing + nxpWidth / 2) - nxpBounds.center.x,
+                0,
+                -nxpBounds.center.z
+            )
+            iphoneEntity.position = SIMD3<Float>(
+                -iphoneBounds.center.x,
+                0,
+                -iphoneBounds.center.z
+            )
+            ipadEntity.position = SIMD3<Float>(
+                (iphoneWidth / 2 + spacing + ipadWidth / 2) - ipadBounds.center.x,
+                0,
+                -ipadBounds.center.z
+            )
+
+            var installedGestures: [UIGestureRecognizer] = []
+            for entity in [nxpEntity, iphoneEntity, ipadEntity] {
+                anchor.addChild(entity)
+                let recognizers = arView.installGestures([.rotation, .translation], for: entity)
+                for recognizer in recognizers {
+                    installedGestures.append(recognizer)
+                }
+            }
+
+            arView.scene.addAnchor(anchor)
+            stationAnchor = anchor
+            stationGestures = installedGestures
+            placedStationBeaconKey = beaconKey
         }
 
         nonisolated func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
@@ -293,22 +511,37 @@ struct ARViewContainer: UIViewRepresentable {
         }
 
         private nonisolated func handleDetectedAnchors(_ anchors: [ARAnchor]) {
-            let verticalTransform = anchors
-                .compactMap { $0 as? ARPlaneAnchor }
+            let planeAnchors = anchors.compactMap { $0 as? ARPlaneAnchor }
+            let verticalTransform = planeAnchors
                 .first(where: { $0.alignment == .vertical })?
                 .transform
+            let horizontalTransform = planeAnchors
+                .first(where: { $0.alignment == .horizontal })?
+                .transform
 
-            guard let transform = verticalTransform else { return }
+            guard verticalTransform != nil || horizontalTransform != nil else { return }
 
             Task { @MainActor in
-                guard self.showBoard, self.boardAnchor == nil, let arView = self.arView else { return }
-                let board = BoardEntity(uiImage: "rozklad", scale: 1.0)
-                self.boardAnchor = self.place(
-                    board,
-                    transform: transform,
-                    planeAlignment: .vertical,
-                    in: arView
-                )
+                guard let arView = self.arView else { return }
+
+                if let vTransform = verticalTransform, self.showBoard, self.boardAnchor == nil {
+                    let board = BoardEntity(uiImage: "rozklad", scale: 1.0)
+                    if let placed = self.place(
+                        board,
+                        transform: vTransform,
+                        planeAlignment: .vertical,
+                        in: arView
+                    ) {
+                        self.boardAnchor = placed.anchor
+                        self.boardGestures = placed.gestures
+                    }
+                }
+
+                if let hTransform = horizontalTransform,
+                   let beaconKey = self.activeStationBeaconKey,
+                   self.stationAnchor == nil {
+                    self.placeStationShowcase(at: hTransform, for: beaconKey, in: arView)
+                }
             }
         }
 
@@ -316,8 +549,17 @@ struct ARViewContainer: UIViewRepresentable {
             guard let arView = arView else { return }
             let tapLocation = recognizer.location(in: arView)
 
-            if arView.entity(at: tapLocation) != nil { return }
+            // 1. Kliknięcie na istniejący model (NXP, iPhone lub iPad) -> pokaż informacje
+            let hitEntities = arView.entities(at: tapLocation)
+            if let tappedModel = hitEntities.compactMap({ findModelEntity(from: $0) }).first,
+               let modelType = tappedModel.modelType {
+                onSelectModelInfo?(modelType, tappedModel.isBeaconOwned)
+                return
+            }
 
+            if !hitEntities.isEmpty { return }
+
+            // 2. Ręczne dodawanie wybranego modelu po kliknięciu w płaszczyznę
             let results = arView.raycast(
                 from: tapLocation,
                 allowing: .estimatedPlane,
@@ -329,10 +571,7 @@ struct ARViewContainer: UIViewRepresentable {
 
             switch planeAlignment {
             case .horizontal:
-                let customEntity = CustomModelEntity(
-                    modelName: selectedModel.rawValue,
-                    scale: selectedModel.scale
-                )
+                let customEntity = CustomModelEntity(model: selectedModel, isBeaconOwned: false)
                 place(
                     customEntity,
                     transform: firstResult.worldTransform,
@@ -342,15 +581,29 @@ struct ARViewContainer: UIViewRepresentable {
             case .vertical:
                 guard showBoard, boardAnchor == nil else { return }
                 let boardEntity = BoardEntity(uiImage: "rozklad", scale: 2.0)
-                boardAnchor = place(
+                if let placed = place(
                     boardEntity,
                     transform: firstResult.worldTransform,
                     planeAlignment: planeAlignment,
                     in: arView
-                )
+                ) {
+                    boardAnchor = placed.anchor
+                    boardGestures = placed.gestures
+                }
             @unknown default:
                 return
             }
+        }
+
+        private func findModelEntity(from entity: Entity?) -> CustomModelEntity? {
+            var current = entity
+            while let node = current {
+                if let modelEntity = node as? CustomModelEntity {
+                    return modelEntity
+                }
+                current = node.parent
+            }
+            return nil
         }
 
         private func alignment(for result: ARRaycastResult) -> ARPlaneAnchor.Alignment? {
@@ -373,16 +626,20 @@ struct ARViewContainer: UIViewRepresentable {
             transform: simd_float4x4,
             planeAlignment: ARPlaneAnchor.Alignment,
             in arView: ARView
-        ) -> AnchorEntity? {
+        ) -> (anchor: AnchorEntity, gestures: [UIGestureRecognizer])? {
             guard entity.allowedAlignment == planeAlignment else { return nil }
 
             let anchor = AnchorEntity(world: transform)
             anchor.addChild(entity)
             arView.scene.addAnchor(anchor)
 
-            // Obrót dwoma palcami, przesuwanie jednym, skalowanie "pinch"
-            arView.installGestures([.rotation, .translation, .scale], for: entity)
-            return anchor
+            // Obrót dwoma palcami i przesuwanie jednym (skalowanie usunięte)
+            let recognizers = arView.installGestures([.rotation, .translation], for: entity)
+            var gestures: [UIGestureRecognizer] = []
+            for recognizer in recognizers {
+                gestures.append(recognizer)
+            }
+            return (anchor, gestures)
         }
     }
 }
